@@ -86,6 +86,22 @@ func (a *Adapter) ListFiles(ctx context.Context, prefix string) ([]string, error
 	return a.store.ListFiles(ctx, prefix)
 }
 
+// Exists reports whether the object exists. The S3 store has no HeadObject
+// wrapper, so a one-key list under the exact path is used; a match on the key
+// itself (not merely a shared prefix) means present.
+func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
+	files, err := a.store.ListFiles(ctx, path)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range files {
+		if f == path {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (a *Adapter) DeleteFile(ctx context.Context, path string) error {
 	return a.store.DeleteFile(ctx, path)
 }

@@ -28,6 +28,7 @@ func (f *fakeSink) WriteFile(context.Context, string, io.Reader) error        { 
 func (f *fakeSink) ReadFile(context.Context, string) (io.ReadCloser, error)   { return nil, nil }
 func (f *fakeSink) ListFiles(context.Context, string) ([]string, error)       { return nil, nil }
 func (f *fakeSink) DeleteFile(context.Context, string) error                  { return nil }
+func (f *fakeSink) Exists(context.Context, string) (bool, error)              { return true, nil }
 func (f *fakeSink) Backend() string                                           { return "filesystem" }
 
 func newTestServer(storagePath string) *server {
@@ -118,7 +119,7 @@ func TestToolsList(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal tools: %v", err)
 	}
-	want := []string{"list_tables", "describe_table", "query", "recent_changes"}
+	want := []string{"list_tables", "list_generations", "describe_table", "query", "recent_changes"}
 	if len(got.Tools) != len(want) {
 		t.Fatalf("tools count = %d, want %d", len(got.Tools), len(want))
 	}

@@ -19,6 +19,12 @@ type Sink interface {
 	// ListFiles lists files under a prefix.
 	ListFiles(ctx context.Context, prefix string) ([]string, error)
 
+	// Exists reports whether a single file exists at path. Readers use it to
+	// confirm a manifest-named segment is really present before opening it, so
+	// a missing file is reported as missing rather than silently replaced by a
+	// different one.
+	Exists(ctx context.Context, path string) (bool, error)
+
 	// DeleteFile removes a file from storage.
 	DeleteFile(ctx context.Context, path string) error
 

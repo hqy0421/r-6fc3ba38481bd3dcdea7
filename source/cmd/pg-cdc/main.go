@@ -32,6 +32,7 @@ func main() {
 	root.AddCommand(discoverCmd())
 	root.AddCommand(teardownCmd())
 	root.AddCommand(catalogCmd())
+	root.AddCommand(generationsCmd())
 	root.AddCommand(versionCmd())
 
 	if err := root.Execute(); err != nil {

@@ -57,6 +57,10 @@ func (a *Adapter) ListFiles(ctx context.Context, prefix string) ([]string, error
 	return nil, fmt.Errorf("gcs sink: not yet implemented")
 }
 
+func (a *Adapter) Exists(ctx context.Context, path string) (bool, error) {
+	return false, fmt.Errorf("gcs sink: not yet implemented")
+}
+
 func (a *Adapter) DeleteFile(ctx context.Context, path string) error {
 	return fmt.Errorf("gcs sink: not yet implemented")
 }

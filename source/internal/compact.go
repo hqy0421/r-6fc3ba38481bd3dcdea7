@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/burnside-project/burnside-go/epoch"
 	"github.com/burnside-project/burnside-go/manifest"
 	btypes "github.com/burnside-project/burnside-go/types"
 
+	"github.com/burnside-project/pg-cdc-core/internal/generation"
 	"github.com/burnside-project/pg-cdc-core/internal/ports"
 	"github.com/burnside-project/pg-cdc-core/internal/writer"
 
@@ -27,6 +29,14 @@ func Compact(ctx context.Context, sink ports.Sink) error {
 
 	fmt.Printf("Compacting %d tables\n", len(m.ActiveTables()))
 
+	// Deltas that a saved manifest generation still references must survive
+	// compaction, or pinned reads of that generation break. Load the protected
+	// set up front so a failure here aborts before any file is deleted.
+	protected, err := generation.ProtectedSegments(ctx, sink)
+	if err != nil {
+		return fmt.Errorf("load saved manifest generations: %w", err)
+	}
+
 	for tableName, table := range m.ActiveTables() {
 		if table.LatestDeltaEpoch <= table.BaseEpoch {
 			fmt.Printf("  %s: up to date (base=%d, latest=%d)\n", tableName, table.BaseEpoch, table.LatestDeltaEpoch)
@@ -39,7 +49,7 @@ func Compact(ctx context.Context, sink ports.Sink) error {
 			continue
 		}
 
-		if err := compactTable(ctx, sink, m, tableName, table, schema); err != nil {
+		if err := compactTable(ctx, sink, m, tableName, table, schema, protected); err != nil {
 			return fmt.Errorf("compact %s: %w", tableName, err)
 		}
 	}
@@ -55,13 +65,15 @@ func Compact(ctx context.Context, sink ports.Sink) error {
 	return nil
 }
 
-func compactTable(ctx context.Context, sink ports.Sink, m *manifest.Manifest, tableName string, table manifest.Table, schema manifest.Schema) error {
-	// Step 1: Read current base into memory (keyed by PK)
+// compactTable merges one table's deltas into a new base. protected holds
+// segment paths referenced by saved manifest generations; a delta in that set
+// is left in place so a pinned read of an older generation stays possible.
+func compactTable(ctx context.Context, sink ports.Sink, m *manifest.Manifest, tableName string, table manifest.Table, schema manifest.Schema, protected map[string]struct{}) error {
+	// Step 1: Read the base named by BaseEpoch into memory (keyed by PK).
 	rows, err := readBase(ctx, sink, table)
 	if err != nil {
 		return fmt.Errorf("read base: %w", err)
 	}
-
 	pkCols := table.PrimaryKey
 	if len(pkCols) == 0 {
 		return fmt.Errorf("no primary key for %s", tableName)
@@ -163,26 +175,56 @@ func compactTable(ctx context.Context, sink ports.Sink, m *manifest.Manifest, ta
 	t.RowCount = int64(len(indexed))
 	m.Tables[tableName] = t
 
-	// Step 6: Delete old delta files
+	// Step 6: Delete old delta files, except any a saved generation still
+	// references. Deleting those would leave that generation pointing at
+	// files that no longer exist, which the reader treats as fatal.
+	var kept int
 	for _, deltaFile := range newDeltas {
+		if _, ok := protected[deltaFile]; ok {
+			kept++
+			continue
+		}
 		_ = sink.DeleteFile(ctx, deltaFile)
 	}
 
 	fmt.Printf("  %s: compacted %d deltas → base_%06d (%d rows, %d applied, %d purged)\n",
 		tableName, len(newDeltas), newBaseEpoch, len(indexed), applied, purged)
+	if kept > 0 {
+		fmt.Printf("  %s: retained %d delta file(s) referenced by saved generations\n", tableName, kept)
+	}
 	return nil
 }
 
+// readBase reads the base file the manifest names for the table. It opens
+// exactly base_<BaseEpoch>.parquet: never an older base, and never a newer one
+// left behind by a compaction whose manifest write was lost.
 func readBase(ctx context.Context, sink ports.Sink, table manifest.Table) ([]writer.Row, error) {
-	basePath := table.Path + "/base/"
-	files, err := sink.ListFiles(ctx, basePath)
+	p := generation.BasePath(table.Path, table.BaseEpoch)
+	ok, err := sink.Exists(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	if len(files) == 0 {
-		return nil, nil
+	if !ok {
+		return nil, fmt.Errorf("base %s (epoch %d) not found; available bases: %v",
+			p, table.BaseEpoch, availableBases(ctx, sink, table.Path))
 	}
-	return readParquetRows(ctx, sink, files[len(files)-1])
+	return readParquetRows(ctx, sink, p)
+}
+
+// availableBases lists the base epochs present for a table, for error messages.
+func availableBases(ctx context.Context, sink ports.Sink, tablePath string) []int64 {
+	files, err := sink.ListFiles(ctx, tablePath+"/base/")
+	if err != nil {
+		return nil
+	}
+	var epochs []int64
+	for _, f := range files {
+		if n, err := generation.ParseBaseEpoch(f); err == nil {
+			epochs = append(epochs, n)
+		}
+	}
+	sort.Slice(epochs, func(i, j int) bool { return epochs[i] < epochs[j] })
+	return epochs
 }
 
 func readParquetRows(ctx context.Context, sink ports.Sink, path string) ([]writer.Row, error) {

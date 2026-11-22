@@ -84,7 +84,7 @@ Any client that speaks MCP over stdio can connect. Provide:
 
 ## Tools
 
-The server exposes four tools. The LLM picks which to call based on the user's question.
+The server exposes four read tools plus generation discovery. The LLM picks which to call based on the user's question.
 
 ### `list_tables`
 
@@ -165,6 +165,37 @@ Returns rows from the *streaming delta files only* — i.e. changes that have ar
 **Backed by:** DuckDB CLI subprocess.
 
 If no deltas have been written yet (e.g. you just ran `init` and haven't streamed anything), the tool returns a friendly *"no streaming changes recorded yet"* message rather than an error.
+
+## Pinned reads: saved manifest generations
+
+The live manifest only describes the newest state. To read a *previously published* version — "last week's numbers", frozen while streaming and compaction keep running — first save the live manifest as a numbered, immutable **generation**:
+
+```bash
+pg-cdc generations save --config pg-cdc.yml     # snapshot the live manifest
+pg-cdc generations list --config pg-cdc.yml     # what's available
+pg-cdc generations prune --older-than 168h --config pg-cdc.yml
+```
+
+A generation records, for every active table, the exact base file and the exact ordered list of delta files the manifest referred to at that moment. Every read tool (`list_tables`, `describe_table`, `query`, `recent_changes`) accepts a `generation` argument:
+
+```json
+{ "name": "query", "arguments": { "sql": "SELECT * FROM public.orders", "generation": 7 } }
+```
+
+`list_generations` (no arguments) lists what has been saved.
+
+**Pinned reads are strict, by design:**
+
+| Situation | Behavior |
+|---|---|
+| `generation` omitted or `0` | Read the live manifest |
+| Generation exists | Read only its recorded base + deltas — files written after it was saved are invisible |
+| Generation does not exist | Error naming the generations that do. **Never** falls back to the live manifest |
+| A recorded segment was deleted from storage | Error naming every missing segment. **Never** substitutes a base or delta from a newer generation |
+
+The read compiles to an explicit `read_parquet([...])` file list, not a directory glob — that is what keeps a later flush or compaction from leaking into a pinned answer. Compaction consults saved generations before deleting merged deltas, so a generation stays readable until it is pruned or a required segment is otherwise removed.
+
+To hand a pinned view to someone else, copy the record file (`manifest-generations/gen-NNNNNN.json`); a bare `manifest.json` is not accepted as a generation, because it does not record which delta files existed when it was written.
 
 ## What the LLM does with these tools
 

@@ -4,8 +4,12 @@ package filesystem
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	"github.com/burnside-project/burnside-go/manifest"
 	"github.com/burnside-project/burnside-go/storage"
@@ -40,6 +44,32 @@ func (a *Adapter) ReadFile(ctx context.Context, path string) (io.ReadCloser, err
 
 func (a *Adapter) ListFiles(ctx context.Context, prefix string) ([]string, error) {
 	return a.store.ListFiles(ctx, prefix)
+}
+
+// Exists reports whether the file exists. It stats the path directly when the
+// underlying store exposes its base directory, so the answer is exact for a
+// manifest-named file and costs one syscall.
+func (a *Adapter) Exists(_ context.Context, path string) (bool, error) {
+	if fsStore, ok := a.store.(*storage.Filesystem); ok {
+		_, err := os.Stat(filepath.Join(fsStore.BasePath(), filepath.FromSlash(path)))
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	// Fallback for any other ReaderWriter: open and discard the handle.
+	f, err := a.store.ReadFile(context.Background(), path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	_ = f.Close()
+	return true, nil
 }
 
 func (a *Adapter) DeleteFile(ctx context.Context, path string) error {
